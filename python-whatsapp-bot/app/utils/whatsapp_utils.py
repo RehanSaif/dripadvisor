@@ -2,6 +2,8 @@ import logging
 from flask import current_app, jsonify
 import json
 import requests
+import openai
+from openai import OpenAI
 
 # from app.services.openai_service import generate_response
 import re
@@ -89,8 +91,9 @@ def process_whatsapp_message(body):
     message = body["entry"][0]["changes"][0]["value"]["messages"][0]
     if 'text' in message:
         message_body = message["text"]["body"]
+        logging.info(type(message_body))
         response = generate_response(message_body)
-        data = get_text_message_input(current_app.config["RECIPIENT_WAID"], response)
+        data = get_text_message_input(wa_id, response)
         send_message(data)
 
     elif 'image' in message:
@@ -99,8 +102,14 @@ def process_whatsapp_message(body):
         image_data = fetch_image(url)
         
         encoded_image = encode_image_to_base64(image_data)
-        answer = call_gpt_vision(encoded_image)
-        logging.info(answer)
+        response_dict = call_gpt_vision(encoded_image)
+        response_content = response_dict['choices'][0]['message']['content']
+        item_recommendation = response_content.replace(' ', '%20')
+        response_url = 'https://www.google.com/search?tbm=shop&q={}'.format(item_recommendation)
+        logging.info(response_url)
+        
+        data = get_text_message_input(wa_id, response_url)
+        send_message(data)
         
 
     # TODO: implement custom function here
@@ -172,7 +181,7 @@ def encode_image_to_base64(image_data):
     logging.info('Image encoded')
     return base64.b64encode(image_data).decode('utf-8')
 
-def ask_openai_vision(api_key, encoded_image, question, model='gpt-4.0-vision', image_type='image/jpeg'):
+def ask_openai_vision(api_key, encoded_image, question, model='gpt-4.0-vision-preview', image_type='image/jpeg'):
     """
     Sends a request to OpenAI's Vision API with an encoded image and a question about the image.
 
@@ -183,36 +192,63 @@ def ask_openai_vision(api_key, encoded_image, question, model='gpt-4.0-vision', 
     :param image_type: The MIME type of the image (e.g., "image/jpeg", "image/png").
     :return: The API response as a JSON object.
     """
-    url = 'https://api.openai.com/v1/images/generations'
+
     headers = {
         'Authorization': f'Bearer {api_key}',
         'Content-Type': 'application/json'
     }
+    
     payload = {
-        "model": model,
-        "n": 1,  # Number of generations to return
-        "prompt": {
-            "text": question,
-            "image": {
-                "data": encoded_image,
-                "type": image_type  # Adjust if your image is in a different format
+    "model": "gpt-4-vision-preview",
+    "messages": [
+        {
+        "role": "user",
+        "content": [
+            {
+            "type": "text",
+            "text": question
+            },
+            {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{encoded_image}"
             }
+            }
+        ]
         }
+    ],
+    "max_tokens": 300
     }
+    response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
 
-    response = requests.post(url, headers=headers, data=json.dumps(payload))
     if response.status_code == 200:
         return response.json()
     else:
         raise Exception(f"API request failed with status code {response.status_code}: {response.text}")
 
 def call_gpt_vision(encoded_image, openai_api_key=OPENAI_API_KEY):
-    question = "What is this image about?"  # Your question about the image
+    prompt = "Assume the role of a world-class fashion stylist with an expert eye for style, trends, and coordination. Analyze the outfit worn by the individual in the uploaded image. Consider all aspects of the ensemble, including color schemes, fabric types, the occasion the outfit might be suited for, gender, and current fashion trends. Based on your analysis, recommend an item that would complement and enhance this outfit. Your suggestion should not only align with the individual's existing style but also elevate the overall look. The output should just be the item without articles."
     logging.info("Call GPT vision")
     try:
-        response = ask_openai_vision(openai_api_key, encoded_image, question)
+        response = ask_openai_vision(openai_api_key, encoded_image, question=prompt)
+        logging.info(response)
+        logging.info('Call success')
         return response  # Inspect the full response structure to extract the answer
     except Exception as e:
         return f"An error occurred: {e}"
-        
+
+def call_dalle(image_prompt):
+    client = OpenAI()
+    response = client.images.generate(
+        model="dall-e-3",
+        prompt=image_prompt,
+        size="1024x1024",
+        quality="standard",
+        n=1,
+        )
+
+    image_url = response.data[0].url
+    return(image_url)
+
+    
 
